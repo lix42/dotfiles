@@ -6,3 +6,6 @@ unset brew
 
 # Vite+ again: its env script moves its bin back in front of Homebrew's
 if [ -r "$HOME/.vite-plus/env" ]; then . "$HOME/.vite-plus/env"; fi
+
+# Keep ~/.local/bin ahead of Homebrew and Vite+, as when .zshrc added it
+if [[ -d $HOME/.local/bin ]]; then path=("$HOME/.local/bin" ${path:#$HOME/.local/bin}); fi

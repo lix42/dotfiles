@@ -11,8 +11,9 @@ settings and secrets stay in local, untracked files (see below).
 | Path | Purpose |
 |---|---|
 | `.claude/statusline-command.sh` | Claude Code status line (needs `jq`, `git`) |
-| `.zshenv` | Every zsh: cargo and Vite+ on PATH, loads `secrets.zsh` |
-| `.zprofile` | Login shells: Homebrew (Apple Silicon, Intel, or Linux) |
+| `.local/bin/dotcfg` | `git` for this repo; works in every shell and script |
+| `.zshenv` | Every zsh: cargo, Vite+ and `~/.local/bin` on PATH, loads `secrets.zsh` |
+| `.zprofile` | Login shells: Homebrew (Apple Silicon, Intel, or Linux), then `~/.local/bin` first again |
 | `.zshrc` | Interactive shells: Oh My Zsh (must be installed), tools, aliases, loads `local.zsh` |
 | `.config/zsh/secrets.zsh.example` | Names of the secrets each machine needs |
 | `.config/dotfiles/bootstrap.sh` | Sets up a new machine; safe to re-run |
@@ -42,11 +43,11 @@ git --git-dir="$HOME/.cfg" show main:.config/dotfiles/bootstrap.sh | sh
 6. Sets `statusLine` in `~/.claude/settings.json`, leaving every other setting
    as it is, and backs up the file first.
 
-Then add the alias to `~/.zshrc`:
-
-```sh
-alias dotcfg='git --git-dir=$HOME/.cfg --work-tree=$HOME'
-```
+Then open a new shell. `dotcfg` is `~/.local/bin/dotcfg`, which `~/.zshenv`
+puts on PATH for every zsh, including non-interactive ones such as scripts and
+Claude Code's `!` commands. Interactive shells also define a `dotcfg` alias
+with the same meaning, because git's tab completion only finds the repo when
+`--git-dir` and `--work-tree` appear on the command line.
 
 ## Daily use
 
