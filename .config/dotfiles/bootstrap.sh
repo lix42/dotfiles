@@ -82,5 +82,4 @@ else
   log "jq not found; skipped the Claude Code statusLine setting"
 fi
 
-log "Done. Add to ~/.zshrc if missing:"
-printf "    alias dotcfg='git --git-dir=\$HOME/.cfg --work-tree=\$HOME'\n"
+log "Done. Open a new shell to get dotcfg (~/.local/bin/dotcfg) on PATH."

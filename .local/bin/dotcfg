@@ -1,0 +1,4 @@
+#!/bin/sh
+# Git for the dotfiles bare repo, whose work tree is $HOME.
+# A command rather than an alias, so non-interactive shells and scripts have it.
+exec git --git-dir="${DOTFILES_DIR:-$HOME/.cfg}" --work-tree="$HOME" "$@"

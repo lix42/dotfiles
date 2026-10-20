@@ -122,9 +122,9 @@ zstyle ':omz:plugins:eza' 'color-scale' all
 export ENABLE_LSP_TOOL=1
 
 # Dotfiles bare repo: https://github.com/lix42/dotfiles
+# ~/.local/bin/dotcfg works in every shell; this alias shadows it interactively
+# because git completion only sees --git-dir and --work-tree when they are typed.
 alias dotcfg='git --git-dir=$HOME/.cfg --work-tree=$HOME'
-
-if [ -r "$HOME/.local/bin/env" ]; then . "$HOME/.local/bin/env"; fi
 
 if (( $+commands[starship] )); then eval "$(starship init zsh)"; fi
 
