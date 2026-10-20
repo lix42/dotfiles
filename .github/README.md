@@ -11,6 +11,9 @@ settings and secrets stay in local, untracked files (see below).
 | Path | Purpose |
 |---|---|
 | `.claude/statusline-command.sh` | Claude Code status line (needs `jq`, `git`) |
+| `.zshenv` | Every zsh: cargo and Vite+ on PATH, loads `secrets.zsh` |
+| `.zprofile` | Login shells: Homebrew (Apple Silicon, Intel, or Linux) |
+| `.zshrc` | Interactive shells: Oh My Zsh (must be installed), tools, aliases, loads `local.zsh` |
 | `.config/zsh/secrets.zsh.example` | Names of the secrets each machine needs |
 | `.config/dotfiles/bootstrap.sh` | Sets up a new machine; safe to re-run |
 | `.config/dotfiles/hooks/pre-commit` | Blocks commits that look like they contain a credential |
@@ -67,22 +70,24 @@ Shared zsh files load two local files that are never committed:
 | `~/.config/zsh/local.zsh` | Machine-specific settings: `ARCHFLAGS`, unusual install paths, work-only tools |
 | `~/.config/zsh/secrets.zsh` | API keys and tokens; mode 600 |
 
-Load them from the shared files:
+Load them from the shared files. Use `if`, not `[ -r … ] && .`: when the file
+is missing, the `&&` form leaves status 1 behind, and the first prompt shows a
+failure.
 
 ```sh
 # ~/.zshenv: secrets, so non-interactive shells get them too
-[ -r "$HOME/.config/zsh/secrets.zsh" ] && . "$HOME/.config/zsh/secrets.zsh"
+if [ -r "$HOME/.config/zsh/secrets.zsh" ]; then . "$HOME/.config/zsh/secrets.zsh"; fi
 
 # end of ~/.zshrc: machine-specific settings, so they win over shared defaults
-[ -r "$HOME/.config/zsh/local.zsh" ] && . "$HOME/.config/zsh/local.zsh"
+if [ -r "$HOME/.config/zsh/local.zsh" ]; then . "$HOME/.config/zsh/local.zsh"; fi
 ```
 
 Rules for the shared files:
 
 - Use `$HOME`, never `/Users/<name>`.
 - Set up a tool only if it is installed, for example
-  `[ -d "$HOME/.bun" ] && export BUN_INSTALL="$HOME/.bun"` or
-  `command -v starship >/dev/null && eval "$(starship init zsh)"`.
+  `if [ -d "$HOME/.bun" ]; then …; fi` or
+  `if (( $+commands[starship] )); then eval "$(starship init zsh)"; fi`.
 - When you add a secret, add its name to `secrets.zsh.example`.
 
 The pre-commit hook rejects staged lines that look like GitHub, OpenAI-style,
