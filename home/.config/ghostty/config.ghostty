@@ -1,0 +1,29 @@
+quit-after-last-window-closed = true
+clipboard-read = allow
+window-theme = ghostty
+window-padding-balance = true
+background-opacity = 0.9
+background-blur = macos-glass-regular
+split-divider-color = "e0f0f0"
+cursor-color = #F48915
+cursor-style-blink = true
+font-size = 16
+font-family = "FiraCode Nerd Font"
+mouse-hide-while-typing = true
+
+# macOS-style Cmd+Arrow navigation.
+#
+# Ghostty's defaults send Ctrl-A / Ctrl-E for Cmd+Left / Cmd+Right, and swallow
+# Cmd+Up / Cmd+Down entirely for jump_to_prompt. Ctrl-A / Ctrl-E collide with
+# Neovim's insert-mode i_CTRL-A / i_CTRL-E (and blink.cmp's menu cancel), so
+# send Home / End / Ctrl-Home / Ctrl-End instead -- understood natively by both
+# Neovim and readline.
+#
+# Sequences must match xterm-ghostty terminfo: the Home/End *keys* are SS3
+# (khome=\EOH, kend=\EOF) -- \E[H is the cursor-home output capability, not a
+# key, and Neovim does not read it as <Home>. Ctrl-Home/Ctrl-End are CSI
+# (kHOM5, kEND5).
+keybind = super+arrow_left=text:\x1bOH
+keybind = super+arrow_right=text:\x1bOF
+keybind = super+arrow_up=text:\x1b[1;5H
+keybind = super+arrow_down=text:\x1b[1;5F
