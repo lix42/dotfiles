@@ -1,0 +1,560 @@
+#!/usr/bin/env bash
+# Copy dotfiles between this repo's home/ and $HOME. Run `dotfiles help`.
+# Written for bash 3.2, the version macOS ships.
+set -euo pipefail
+
+# Resolve the ~/.local/bin/dotfiles link to this file (no readlink -f before
+# macOS 12.3).
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname "$self")/$link" ;;
+  esac
+done
+DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "$self")/.." && pwd)}"
+SRC="$DOTFILES_DIR/home"
+PATTERNS="$DOTFILES_DIR/.githooks/secret-patterns"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles"
+# Baseline: each file as of its last install, sync, or merge, in a local git
+# repo that is never pushed. Comparing both copies against it tells which side
+# changed.
+BASE="$STATE_DIR/base"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+# Machine-specific settings and secrets: never copied into the repo.
+NEVER_MANAGE=".config/zsh/local.zsh .config/zsh/secrets.zsh"
+
+log() { printf '==> %s\n' "$*"; }
+warn() { printf 'dotfiles: %s\n' "$*" >&2; }
+die() {
+  warn "$*"
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+Usage: dotfiles <command> [args]
+
+Files under $SRC are copied to the same path under \$HOME.
+
+  status [file...]        Each managed file compared with its last install/sync:
+                            same      both copies match
+                            local     edited in \$HOME        -> dotfiles sync
+                            repo      updated in the repo     -> dotfiles install
+                            both      changed on both sides   -> dotfiles merge
+                            differs   no baseline yet         -> dotfiles diff, then choose
+                            missing   not in \$HOME           -> dotfiles install
+  diff [file...]          Diff repo (-) against \$HOME (+)
+  install [--dry-run] [--force] [file...]
+                          Copy repo -> \$HOME. Skips local and both unless --force.
+                          Replaced files are backed up to $STATE_DIR/backup/.
+                          With no files, also sets up machine state (see below).
+  sync [--dry-run] [--force] [file...]
+                          Copy \$HOME -> repo. Skips repo and both unless --force.
+  merge [file...]         Three-way merge files changed on both sides. A clean
+                          result goes to both copies; on conflicts, the markers
+                          go to the repo copy for you to resolve.
+  add <file...>           Start managing files from \$HOME
+  log [-p] [file...]      History of installs, syncs and merges on this machine
+  setup [--dry-run]       New machine: install, then install/tools.sh, then status
+  help                    Show this help
+
+Machine state set up by a full install: ~/.config/zsh/local.zsh and secrets.zsh
+(created if missing), the ~/.local/bin/dotfiles link, this repo's git hooks, and
+the Claude Code statusLine setting.
+EOF
+}
+
+managed() { (cd "$SRC" && find . -type f ! -name .DS_Store | sed 's|^\./||' | LC_ALL=C sort); }
+
+# Map <repo>/home/x, $HOME/x, home/x or x to x, the path relative to $HOME.
+# The repo usually lives under $HOME, so its prefix is checked first.
+rel() {
+  local p="$1"
+  case "$p" in
+    "$SRC"/*) p="${p#"$SRC"/}" ;;
+    "$HOME"/*) p="${p#"$HOME"/}" ;;
+    home/*) p="${p#home/}" ;;
+  esac
+  # Drop "./" segments and repeated slashes, so the deny-lists in cmd_add see
+  # the path as plain text.
+  while :; do
+    case "$p" in
+      ./*) p="${p#./}" ;;
+      */./*) p="${p%%/./*}/${p#*/./}" ;;
+      *//*) p="${p%%//*}/${p#*//}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$p"
+}
+
+# The managed files named in the arguments, or all of them.
+targets() {
+  if [ "$#" -eq 0 ]; then
+    managed
+    return
+  fi
+  local a f
+  for a in "$@"; do
+    f="$(rel "$a")"
+    [ -f "$SRC/$f" ] || die "not managed: $f (start managing it with: dotfiles add ~/$f)"
+    printf '%s\n' "$f"
+  done
+}
+
+state() {
+  local f="$1"
+  if [ ! -e "$HOME/$f" ]; then
+    echo missing
+  elif cmp -s "$SRC/$f" "$HOME/$f"; then
+    echo same
+  elif [ ! -f "$BASE/$f" ]; then
+    echo differs
+  elif cmp -s "$BASE/$f" "$HOME/$f"; then
+    echo repo
+  elif cmp -s "$BASE/$f" "$SRC/$f"; then
+    echo local
+  else
+    echo both
+  fi
+}
+
+# Run before a command copies anything, so a bad patterns file stops it up
+# front rather than partway through.
+check_patterns() {
+  local rc=0
+  [ -r "$PATTERNS" ] || die "can't read $PATTERNS, so can't check files for secrets"
+  grep -qE -f "$PATTERNS" /dev/null || rc=$?
+  # grep exits 2 on a bad pattern; treating that as "no secret" would fail open.
+  [ "$rc" -le 1 ] || die "a pattern in $PATTERNS is invalid; fix it first"
+}
+
+looks_secret() {
+  local rc=0
+  grep -qE -f "$PATTERNS" "$1" || rc=$?
+  [ "$rc" -le 1 ] || die "grep failed checking $1 for secrets"
+  [ "$rc" -eq 0 ]
+}
+
+# Credential locations, relative to $HOME. cmd_add compares them with the file
+# by identity (`-ef`: same device and inode), so no other spelling of the same
+# path gets past: case, lookalike letters (ſ for s), //, symlinked
+# directories, or /System/Volumes/Data.
+CREDENTIAL_DIRS=".ssh .gnupg .aws .kube"
+CREDENTIAL_FILES=".docker/config.json .netrc .npmrc .git-credentials"
+
+# Print directory $1's real path, with names as stored on disk. bash's own
+# `pwd -P` keeps the spelling a symlink's target was written with (lookalike
+# letters, /System/Volumes/Data); the external pwd asks the kernel.
+physical_dir() {
+  (cd -P "$1" 2>/dev/null && if [ -x /bin/pwd ]; then /bin/pwd -P; else pwd -P; fi)
+}
+
+# True when every part of ~/$1 is stored exactly as typed. macOS file systems
+# also find case variants and lookalike letters (ſ for s), which the name
+# checks in refuse_sensitive would not match.
+exact_spelling() {
+  local rest="$1" parent="$HOME" part entries
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    # CLICOLOR_FORCE makes macOS ls colour names even into a pipe.
+    entries="$(env -u CLICOLOR -u CLICOLOR_FORCE ls -a "$parent")" || return 1
+    grep -qxF -- "$part" <<<"$entries" || return 1
+    parent="$parent/$part"
+    case "$rest" in
+      */*) rest="${rest#*/}" ;;
+      *) rest="" ;;
+    esac
+  done
+}
+
+# Die when a name in path $2 (starting with /) looks sensitive. $1 is the file
+# being added, for the message.
+refuse_sensitive_name() {
+  shopt -s nocasematch
+  case "$2" in
+    */.ssh/* | */.gnupg/* | */.aws/* | */.kube/* | */.docker/config.json | */.netrc | */.npmrc | \
+      */.git-credentials | *secret* | *.pem | *.key) die "refusing to manage ~/$1: its name looks sensitive${3:-}" ;;
+  esac
+  shopt -u nocasematch
+}
+
+# Die when ~/$1 is a file dotfiles never manages.
+refuse_sensitive() {
+  local f="$1" target="$HOME/$1" p d home_real real
+  for p in $NEVER_MANAGE; do
+    if [ "$target" -ef "$HOME/$p" ]; then
+      die "never managed: ~/$f is ~/$p, which holds machine-specific settings or secrets"
+    fi
+  done
+  for p in $CREDENTIAL_FILES; do
+    if [ "$target" -ef "$HOME/$p" ]; then die "refusing to manage ~/$f: it is ~/$p, a credential file"; fi
+  done
+  # Every directory above the file's real location, so a symlinked directory
+  # (~/x -> ~/.ssh/keys) can't hide that it is inside a credential directory.
+  d="$(physical_dir "$(dirname "$target")")" || die "can't resolve the directory of ~/$f"
+  real="$d/${f##*/}"
+  while :; do
+    for p in $CREDENTIAL_DIRS; do
+      if [ "$d" -ef "$HOME/$p" ]; then die "refusing to manage ~/$f: it is inside ~/$p"; fi
+    done
+    if [ "$d" = / ]; then break; fi
+    d="$(dirname "$d")"
+  done
+  # By name too, wherever it is, such as a backup copy of ~/.ssh: the path as
+  # typed, and the real path when a symlinked directory leads elsewhere in
+  # $HOME (~/s -> ~/my-secrets). Only the part below $HOME is matched, so a
+  # home directory whose own path contains "secret" doesn't refuse everything.
+  refuse_sensitive_name "$f" "/$f"
+  home_real="$(physical_dir "$HOME")" || die "can't resolve \$HOME"
+  case "$real" in
+    "$home_real"/*)
+      if [ "${real#"$home_real"}" != "/$f" ]; then
+        refuse_sensitive_name "$f" "${real#"$home_real"}" " (it is ~${real#"$home_real"})"
+      fi
+      ;;
+  esac
+}
+
+# Die when ~/$1 is the same file as one already managed under another path.
+refuse_managed_twice() {
+  local m
+  while IFS= read -r m; do
+    if [ -n "$m" ] && [ "$HOME/$1" -ef "$HOME/$m" ]; then die "already managed as ~/$m: ~/$1 is the same file"; fi
+  done <<<"$(managed)"
+}
+warn_if_secret() {
+  if looks_secret "$SRC/$1"; then
+    warn "home/$1 looks like it contains a secret; move it to ~/.config/zsh/secrets.zsh before committing"
+  fi
+}
+has_conflict_markers() { grep -qE '^(<<<<<<<|>>>>>>>) ' "$1"; }
+
+# --- Baseline ------------------------------------------------------------------
+bgit() {
+  git -C "$BASE" -c user.name=dotfiles -c user.email=dotfiles@localhost \
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"
+}
+
+# Record the repo copy of a file as its new baseline.
+base_put() {
+  [ -d "$BASE/.git" ] || git init -q "$BASE"
+  mkdir -p "$(dirname "$BASE/$1")"
+  cp "$SRC/$1" "$BASE/$1"
+}
+
+# For a file whose two copies match: make that content the baseline, if it
+# isn't already (no baseline yet, or both copies were edited to the same result).
+base_refresh() {
+  if ! cmp -s "$SRC/$1" "$BASE/$1" 2>/dev/null; then base_put "$1"; fi
+}
+
+base_commit() {
+  [ -d "$BASE/.git" ] || return 0
+  bgit add -A
+  if ! bgit diff --cached --quiet; then bgit commit -q -m "$1"; fi
+}
+
+# --- Commands --------------------------------------------------------------------
+cmd_status() {
+  local list f s n=0
+  list="$(targets "$@")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    s="$(state "$f")"
+    printf '%-8s ~/%s\n' "$s" "$f"
+    if [ "$s" != same ]; then n=$((n + 1)); fi
+  done <<<"$list"
+  if [ "$n" -eq 0 ]; then
+    log "All managed files match."
+  else
+    log "$n file(s) need attention; 'dotfiles help' says what each state means."
+  fi
+  if [ -n "$(git -C "$DOTFILES_DIR" status --porcelain 2>/dev/null)" ]; then
+    log "The repo has uncommitted changes: git -C $DOTFILES_DIR status"
+  fi
+}
+
+cmd_diff() {
+  local list f
+  list="$(targets "$@")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$(state "$f")" in
+      missing) printf 'missing: ~/%s (only in the repo)\n' "$f" ;;
+      same) ;;
+      *) diff -u --label "repo: home/$f" --label "live: ~/$f" "$SRC/$f" "$HOME/$f" || true ;;
+    esac
+  done <<<"$list"
+}
+
+cmd_install() {
+  local dry=0 force=0 full=1 list f s done_list="" skipped=0 backed=0
+  local backup="$STATE_DIR/backup/$STAMP"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      --force) force=1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+  if [ "$#" -gt 0 ]; then full=0; fi
+  list="$(targets "$@")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    s="$(state "$f")"
+    if [ "$s" = same ]; then
+      if [ "$dry" -eq 0 ]; then base_refresh "$f"; fi
+      continue
+    fi
+    if has_conflict_markers "$SRC/$f"; then
+      warn "skipped ~/$f: home/$f still has conflict markers; resolve them first"
+      skipped=1
+      continue
+    fi
+    if [ "$force" -eq 0 ]; then
+      case "$s" in
+        local)
+          warn "skipped ~/$f: edited in \$HOME; keep it with 'dotfiles sync', or overwrite with --force"
+          skipped=1
+          continue
+          ;;
+        both)
+          warn "skipped ~/$f: changed on both sides; combine with 'dotfiles merge', or overwrite with --force"
+          skipped=1
+          continue
+          ;;
+      esac
+    fi
+    if [ "$dry" -eq 1 ]; then
+      printf 'would install ~/%s (%s)\n' "$f" "$s"
+      continue
+    fi
+    if [ "$s" != missing ]; then
+      mkdir -p "$(dirname "$backup/$f")"
+      cp -p "$HOME/$f" "$backup/$f"
+      backed=1
+    fi
+    mkdir -p "$(dirname "$HOME/$f")"
+    cp -p "$SRC/$f" "$HOME/$f"
+    base_put "$f"
+    done_list="$done_list $f"
+    printf 'installed ~/%s\n' "$f"
+  done <<<"$list"
+  if [ "$dry" -eq 0 ]; then base_commit "install:${done_list:- (baseline only)}"; fi
+  if [ "$backed" -eq 1 ]; then log "Replaced files are backed up in $backup"; fi
+  if [ "$full" -eq 1 ]; then
+    if [ "$dry" -eq 1 ]; then
+      log "Dry run: skipped machine state setup."
+    else
+      setup_machine
+    fi
+  fi
+  return "$skipped"
+}
+
+setup_machine() {
+  local zsh_dir="$HOME/.config/zsh" link="$HOME/.local/bin/dotfiles"
+
+  mkdir -p "$zsh_dir"
+  if [ ! -e "$zsh_dir/local.zsh" ]; then
+    : >"$zsh_dir/local.zsh"
+    log "Created $zsh_dir/local.zsh"
+  fi
+  if [ ! -e "$zsh_dir/secrets.zsh" ]; then
+    (umask 077 && cp "$SRC/.config/zsh/secrets.zsh.example" "$zsh_dir/secrets.zsh")
+    log "Created $zsh_dir/secrets.zsh from the example; fill in the values"
+  fi
+  chmod 600 "$zsh_dir/secrets.zsh"
+
+  mkdir -p "$(dirname "$link")"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    warn "$link exists and is not a link; left it alone"
+  elif [ "$(readlink "$link" 2>/dev/null)" != "$DOTFILES_DIR/bin/dotfiles" ]; then
+    ln -sfn "$DOTFILES_DIR/bin/dotfiles" "$link"
+    log "Linked $link"
+  fi
+
+  git -C "$DOTFILES_DIR" config core.hooksPath .githooks
+  "$DOTFILES_DIR/install/claude-settings.sh"
+}
+
+cmd_sync() {
+  local dry=0 force=0 list f s done_list="" skipped=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      --force) force=1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+  check_patterns
+  list="$(targets "$@")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    s="$(state "$f")"
+    case "$s" in
+      same)
+        if [ "$dry" -eq 0 ]; then base_refresh "$f"; fi
+        continue
+        ;;
+      missing)
+        warn "skipped ~/$f: missing in \$HOME"
+        skipped=1
+        continue
+        ;;
+    esac
+    if [ "$force" -eq 0 ]; then
+      case "$s" in
+        repo)
+          warn "skipped ~/$f: updated in the repo; take it with 'dotfiles install', or overwrite the repo copy with --force"
+          skipped=1
+          continue
+          ;;
+        both)
+          warn "skipped ~/$f: changed on both sides; combine with 'dotfiles merge', or overwrite the repo copy with --force"
+          skipped=1
+          continue
+          ;;
+      esac
+    fi
+    if [ "$dry" -eq 1 ]; then
+      printf 'would sync ~/%s (%s)\n' "$f" "$s"
+      continue
+    fi
+    cp "$HOME/$f" "$SRC/$f"
+    base_put "$f"
+    done_list="$done_list $f"
+    printf 'synced ~/%s\n' "$f"
+    warn_if_secret "$f"
+  done <<<"$list"
+  if [ "$dry" -eq 0 ]; then base_commit "sync:${done_list:- (baseline only)}"; fi
+  if [ -n "$done_list" ]; then log "Review with: git -C $DOTFILES_DIR diff"; fi
+  return "$skipped"
+}
+
+cmd_merge() {
+  local list f s tmp rc done_list="" conflicts=0 backup="$STATE_DIR/backup/$STAMP"
+  check_patterns
+  list="$(targets "$@")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    s="$(state "$f")"
+    case "$s" in
+      same) continue ;;
+      local | repo | missing)
+        printf 'no merge needed for ~/%s (%s)\n' "$f" "$s"
+        continue
+        ;;
+      differs)
+        warn "can't merge ~/$f: no baseline yet; review 'dotfiles diff', then install or sync"
+        conflicts=1
+        continue
+        ;;
+    esac
+    tmp="$(mktemp)"
+    # shellcheck disable=SC2064 # expand now: $tmp is reassigned per file
+    trap "rm -f '$tmp'" EXIT
+    rc=0
+    git merge-file -p -L "live ~/$f" -L "last install/sync" -L "repo home/$f" \
+      "$HOME/$f" "$BASE/$f" "$SRC/$f" >"$tmp" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      mkdir -p "$(dirname "$backup/$f")"
+      cp -p "$HOME/$f" "$backup/$f"
+      cp "$tmp" "$SRC/$f"
+      cp "$tmp" "$HOME/$f"
+      base_put "$f"
+      done_list="$done_list $f"
+      printf 'merged ~/%s into both copies (previous live copy: %s)\n' "$f" "$backup/$f"
+      warn_if_secret "$f"
+    elif [ "$rc" -gt 0 ] && [ "$rc" -lt 128 ]; then
+      cp "$tmp" "$SRC/$f"
+      warn "conflicts in ~/$f: resolve the markers in $SRC/$f, then run: dotfiles install --force ~/$f"
+      warn_if_secret "$f"
+      conflicts=1
+    else
+      warn "git merge-file failed on ~/$f"
+      conflicts=1
+    fi
+    rm -f "$tmp"
+  done <<<"$list"
+  if [ -n "$done_list" ]; then base_commit "merge:$done_list"; fi
+  if [ -n "$done_list" ]; then log "Review with: git -C $DOTFILES_DIR diff"; fi
+  return "$conflicts"
+}
+
+cmd_add() {
+  [ "$#" -gt 0 ] || die "usage: dotfiles add <file...>"
+  local a f done_list=""
+  check_patterns
+  for a in "$@"; do
+    f="$(rel "$a")"
+    case "/$f/" in
+      //*) die "not under \$HOME: $a" ;;
+      */../*) die "use a path without '..': $a" ;;
+    esac
+    [ -f "$HOME/$f" ] && [ ! -L "$HOME/$f" ] || die "not a regular file: ~/$f"
+    exact_spelling "$f" || die "no file spelled exactly ~/$f; check the case and spelling of each part"
+    [ ! -e "$SRC/$f" ] || die "already managed: ~/$f"
+    # Managed at the path as typed, which is where apps look for it.
+    refuse_managed_twice "$f"
+    refuse_sensitive "$f"
+    if looks_secret "$HOME/$f"; then
+      die "refusing to manage ~/$f: it looks like it contains a secret; move that to ~/.config/zsh/secrets.zsh first"
+    fi
+    mkdir -p "$(dirname "$SRC/$f")"
+    cp -p "$HOME/$f" "$SRC/$f"
+    base_put "$f"
+    done_list="$done_list $f"
+    log "Now managing ~/$f as home/$f"
+  done
+  base_commit "add:$done_list"
+}
+
+cmd_log() {
+  local opts=() paths=() a
+  for a in "$@"; do
+    case "$a" in
+      -*) opts+=("$a") ;;
+      *) paths+=("$(rel "$a")") ;;
+    esac
+  done
+  [ -d "$BASE/.git" ] || die "no history yet; it starts with the next install, sync, or merge"
+  bgit log --date=format:'%Y-%m-%d %H:%M' --format='%h %ad %s' --stat \
+    ${opts[@]+"${opts[@]}"} -- ${paths[@]+"${paths[@]}"}
+}
+
+cmd_setup() {
+  local rc=0 dry=()
+  if [ "${1:-}" = --dry-run ]; then dry=(--dry-run); fi
+  # Subprocesses, so set -e still applies inside each step.
+  "$self" install ${dry[@]+"${dry[@]}"} || rc=1
+  "$DOTFILES_DIR/install/tools.sh" ${dry[@]+"${dry[@]}"} || rc=1
+  printf '\n'
+  log "Managed files now (installers may have edited shell config):"
+  cmd_status
+  if [ "$rc" -ne 0 ]; then warn "setup had failures or skipped files; see the messages above"; fi
+  return "$rc"
+}
+
+cmd="${1:-help}"
+if [ "$#" -gt 0 ]; then shift; fi
+case "$cmd" in
+  status) cmd_status "$@" ;;
+  diff) cmd_diff "$@" ;;
+  install) cmd_install "$@" ;;
+  sync) cmd_sync "$@" ;;
+  merge) cmd_merge "$@" ;;
+  add) cmd_add "$@" ;;
+  log) cmd_log "$@" ;;
+  setup) cmd_setup "$@" ;;
+  help | -h | --help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
