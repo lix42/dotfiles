@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Block commits whose added lines look like a credential.
+# Patterns: .githooks/secret-patterns. Bypass a false positive with --no-verify.
+# No pipefail: `grep -q` stops reading at the first match, and the SIGPIPE that
+# leaves upstream would turn a match into a failed pipeline, letting it through.
+set -eu
+
+patterns="$(git rev-parse --show-toplevel)/.githooks/secret-patterns"
+if [ ! -r "$patterns" ]; then
+  printf 'pre-commit: cannot read %s; refusing to commit unchecked changes\n' "$patterns" >&2
+  exit 1
+fi
+
+# Added lines of the staged diff: '+' lines inside hunks, so an added line that
+# itself starts with "++ " isn't mistaken for a file header.
+added_lines() {
+  git --literal-pathspecs diff --cached -U0 --no-color --no-ext-diff --no-textconv --diff-filter=ACMRT "$@" |
+    awk '/^diff --git /{ hunk = 0 } /^@@ /{ hunk = 1; next } hunk && /^\+/'
+}
+
+# One pass over the whole staged diff decides; it can't miss a file by name.
+# grep exits 1 for no match, 2 for an error such as an invalid pattern.
+rc=0
+added_lines | grep -qE -f "$patterns" || rc=$?
+if [ "$rc" -eq 1 ]; then exit 0; fi
+if [ "$rc" -ne 0 ]; then
+  printf 'pre-commit: grep failed (is a pattern in %s invalid?); refusing to commit unchecked changes\n' "$patterns" >&2
+  exit 1
+fi
+
+# Name the files. NUL-separated and unquoted, so spaces and non-ASCII survive.
+printf 'pre-commit: possible secret in staged changes:\n' >&2
+while IFS= read -r -d '' f; do
+  if added_lines -- "$f" | grep -qE -f "$patterns"; then printf '  %s\n' "$f" >&2; fi
+done < <(git -c core.quotePath=false diff --cached --name-only -z --diff-filter=ACMRT)
+printf 'pre-commit: move secrets to ~/.config/zsh/secrets.zsh (never managed).\n' >&2
+exit 1
