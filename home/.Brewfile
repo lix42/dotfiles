@@ -32,3 +32,7 @@ brew "poppler"
 brew "ripgrep"
 # Shell extension to navigate your filesystem faster
 brew "zoxide"
+# Terminal emulator that uses platform-native UI and GPU acceleration
+cask "ghostty" if OS.mac?
+# FiraCode Nerd Font (Fira Code)
+cask "font-fira-code-nerd-font"

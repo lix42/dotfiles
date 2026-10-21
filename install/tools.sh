@@ -180,6 +180,17 @@ if have agent-browser || [ "$DRY_RUN" -eq 1 ]; then
   check "agent-browser browser (Chrome for Testing, unless one is found)" "agent-browser install"
 fi
 
+# --- Neovim config: kickstart.nvim fork ---------------------------------------
+# After the Brewfile and cargo crates, which bring its dependencies (git,
+# neovim, ripgrep, fd, tree-sitter). An existing config is never touched.
+log "Neovim config (kickstart.nvim)"
+nvim_dir="${XDG_CONFIG_HOME:-$HOME/.config}/nvim"
+if [ -e "$nvim_dir" ]; then
+  printf '    already present: %s\n' "$nvim_dir"
+else
+  run "git clone https://github.com/lix42/kickstart.nvim.git '$nvim_dir'" || fail "Neovim config (git clone)"
+fi
+
 # --- Summary ------------------------------------------------------------------
 if [ -n "$FAILED" ]; then
   printf '\n==> Failed:\n%s' "$FAILED" >&2

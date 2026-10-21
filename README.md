@@ -89,7 +89,8 @@ Machine state set up by a full `install` (all idempotent):
 | `home/.zshrc` | Interactive shells: Oh My Zsh, tools, aliases; loads `local.zsh` last |
 | `home/.config/zsh/secrets.zsh.example` | Names of the secrets each machine needs |
 | `home/.claude/statusline-command.sh` | Claude Code status line (needs `jq`, `git`) |
-| `home/.Brewfile` | Homebrew packages, for `brew bundle --global` |
+| `home/.Brewfile` | Homebrew packages and casks (Ghostty, FiraCode Nerd Font), for `brew bundle --global` |
+| `home/.config/ghostty/config.ghostty` | Ghostty settings. Ghostty also reads `~/Library/Application Support/com.mitchellh.ghostty/` and lets it override this file, so keep that folder empty |
 | `install/tools.sh` | Installs tools: official installer first, Homebrew as fallback |
 | `install/claude-settings.sh` | Merges `statusLine` into Claude Code settings |
 | `.githooks/pre-commit`, `.githooks/secret-patterns` | Blocks commits that look like they contain a credential |
@@ -111,13 +112,19 @@ Machine state set up by a full `install` (all idempotent):
    - uv
    - Claude Code, with the `claude-code` cask as fallback
 4. starship, from its official script.
-5. Everything in `home/.Brewfile`, via `brew bundle install --global`.
+5. Everything in `home/.Brewfile`, via `brew bundle install --global`,
+   including the Ghostty and FiraCode Nerd Font casks. An app already in
+   `/Applications` that Homebrew didn't install makes the cask fail; take it
+   over once with `brew install --cask --adopt <cask>`.
 6. Cargo crates, after rustup so brew never installs its own Rust: tlrc
    (`tldr`), tree-sitter-cli, cargo-generate, cargo-machete, rustlings.
 7. npm globals, into Vite+'s current Node: agent-browser, then its browser
    download (`agent-browser install`) as a separate step, so a failed download
    is retried on the next run. Global npm packages appear to be tied to one
    Node version, so re-run `install/tools.sh` after changing the default Node.
+8. Neovim config: clones [lix42/kickstart.nvim](https://github.com/lix42/kickstart.nvim)
+   into `~/.config/nvim`. Skipped when that folder already exists; update it
+   with `git -C ~/.config/nvim pull`.
 
 Vite+'s installer edits shell config files whatever you tell it. rustup and uv
 are told not to, and bun's installer skips the edit because `tools.sh` already
