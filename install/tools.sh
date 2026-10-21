@@ -11,7 +11,15 @@
 set -uo pipefail
 
 DRY_RUN=0
-if [ "${1:-}" = --dry-run ]; then DRY_RUN=1; fi
+# Anything else is refused: a mistyped --dry-run must not install for real.
+case "$#:${1:-}" in
+  0:) ;;
+  1:--dry-run) DRY_RUN=1 ;;
+  *)
+    printf 'usage: install/tools.sh [--dry-run]\n' >&2
+    exit 2
+    ;;
+esac
 FAILED=""
 
 # The shell config is managed by dotfiles. Put every tool's bin dir on PATH now:
@@ -96,6 +104,22 @@ else
   else
     fail "Homebrew (later fallbacks to brew will fail too)"
   fi
+fi
+
+# --- Oh My Zsh: ~/.zshrc sources it ------------------------------------------
+# After Homebrew, which brings the Command Line Tools' git the installer needs.
+# --unattended: don't change the login shell or start zsh. --keep-zshrc: the
+# dotfiles' ~/.zshrc is already installed; don't replace it with the template.
+log "Oh My Zsh"
+omz="$HOME/.oh-my-zsh/oh-my-zsh.sh"
+# shellcheck disable=SC2016 # $(curl …) must expand in run's child shell
+if [ -r "$omz" ]; then
+  printf '    already installed: %s\n' "$HOME/.oh-my-zsh"
+elif run 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended --keep-zshrc' &&
+  { [ "$DRY_RUN" -eq 1 ] || [ -r "$omz" ]; }; then
+  :
+else
+  fail "Oh My Zsh"
 fi
 
 # --- Toolchains ---------------------------------------------------------------

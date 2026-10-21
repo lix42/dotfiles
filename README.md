@@ -23,10 +23,13 @@ The repo is public, so cloning needs no credentials. Pushing does: run
 key. Run `setup` in your own terminal: the Homebrew installer asks for your
 password.
 
-`setup` runs `dotfiles install`, then `install/tools.sh`, then
-`dotfiles status`. A tool that fails to install doesn't stop the others: the
-failures are listed at the end and `setup` exits 1. Fix them and re-run;
-installed tools are skipped. Then fill in `~/.config/zsh/secrets.zsh`.
+`setup` runs `dotfiles install`, then `install/tools.sh`, then sets the Claude
+Code status line again (it needs `jq`, which `tools.sh` may have just
+installed), then `dotfiles status`. A tool that fails to install doesn't stop
+the others: the failures are listed at the end and `setup` exits 1. Fix them
+and re-run; installed tools are skipped. Then fill in
+`~/.config/zsh/secrets.zsh`. `setup` and `install/tools.sh` accept only
+`--dry-run` and refuse anything else before changing anything.
 
 ## Commands
 
@@ -34,7 +37,7 @@ installed tools are skipped. Then fill in `~/.config/zsh/secrets.zsh`.
 |---|---|
 | `dotfiles status [file…]` | Which side changed each managed file since its last install or sync (states below) |
 | `dotfiles diff [file…]` | Diff, repo (`-`) against `$HOME` (`+`) |
-| `dotfiles install [--dry-run] [--force] [file…]` | Copy repo → `$HOME`. Skips `local` and `both` unless `--force`. Replaced files go to `~/.local/state/dotfiles/backup/<timestamp>/`. With no files, also sets up machine state (below) |
+| `dotfiles install [--dry-run] [--force] [file…]` | Copy repo → `$HOME`. Skips `local` and `both` unless `--force`. Replaced files go to `~/.local/state/dotfiles/backup/<timestamp>-<pid>/`, one directory per run. With no files, also sets up machine state (below) |
 | `dotfiles sync [--dry-run] [--force] [file…]` | Copy `$HOME` → repo. Skips `repo` and `both` unless `--force` |
 | `dotfiles merge [file…]` | Three-way merge files in state `both` (details below) |
 | `dotfiles add <file…>` | Start managing a file from `$HOME` |
@@ -58,6 +61,7 @@ only lets `status` tell which side changed since then:
 | `both` | Changed on both sides | `merge` |
 | `differs` | No baseline yet, so the direction is unknown | `diff`, then `install` or `sync` |
 | `missing` | Not in `$HOME` | `install` |
+| `link` | A symlink in `$HOME`, perhaps from another dotfiles manager | `install`, which moves the link (not its target) to the backup and puts a copy in its place; `sync` skips it |
 
 `merge` runs `git merge-file` with the baseline as the common ancestor. A clean
 result is written to both copies. On conflicts, the conflict markers go into
@@ -82,7 +86,7 @@ Machine state set up by a full `install` (all idempotent):
 |---|---|
 | `home/.zshenv` | Every zsh: cargo, Vite+ and `~/.local/bin` on PATH; loads `secrets.zsh` |
 | `home/.zprofile` | Login shells: Homebrew, then `~/.local/bin` first again |
-| `home/.zshrc` | Interactive shells: Oh My Zsh, tools; loads `local.zsh` last |
+| `home/.zshrc` | Interactive shells: Oh My Zsh, tools, aliases; loads `local.zsh` last |
 | `home/.config/zsh/secrets.zsh.example` | Names of the secrets each machine needs |
 | `home/.claude/statusline-command.sh` | Claude Code status line (needs `jq`, `git`) |
 | `home/.Brewfile` | Homebrew packages, for `brew bundle --global` |
@@ -96,18 +100,21 @@ Machine state set up by a full `install` (all idempotent):
 `install/tools.sh` skips anything already on PATH, and installs in this order:
 
 1. Homebrew: its official script.
-2. Toolchains, from their official installers:
+2. Oh My Zsh: its official script, with `--unattended` (no login-shell change)
+   and `--keep-zshrc` (keeps the dotfiles' `~/.zshrc`). Skipped when
+   `~/.oh-my-zsh` is already there.
+3. Toolchains, from their official installers:
    - rustup, with no brew fallback
    - Vite+, kept in `~/.vite-plus`, with no brew fallback (the formula depends
      on Homebrew's node). Its shims provide Node, npm, pnpm, Yarn and Bun;
      bun's own installer is the fallback.
    - uv
    - Claude Code, with the `claude-code` cask as fallback
-3. starship, from its official script.
-4. Everything in `home/.Brewfile`, via `brew bundle install --global`.
-5. Cargo crates, after rustup so brew never installs its own Rust: tlrc
+4. starship, from its official script.
+5. Everything in `home/.Brewfile`, via `brew bundle install --global`.
+6. Cargo crates, after rustup so brew never installs its own Rust: tlrc
    (`tldr`), tree-sitter-cli, cargo-generate, cargo-machete, rustlings.
-6. npm globals, into Vite+'s current Node: agent-browser, then its browser
+7. npm globals, into Vite+'s current Node: agent-browser, then its browser
    download (`agent-browser install`) as a separate step, so a failed download
    is retried on the next run. Global npm packages appear to be tied to one
    Node version, so re-run `install/tools.sh` after changing the default Node.

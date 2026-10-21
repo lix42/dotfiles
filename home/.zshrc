@@ -104,6 +104,17 @@ if [[ $OSTYPE == darwin* && $CPUTYPE == arm64 ]]; then export ARCHFLAGS="-arch a
 # alias zshconfig="mate ~/.zshrc"
 # alias ohmyzsh="mate ~/.oh-my-zsh"
 
+# Aliases: here rather than in $ZSH_CUSTOM, so they don't depend on Oh My Zsh.
+# vi and cat are replaced only when nvim and bat exist, so they keep working
+# without them. cc shadows the C compiler in interactive shells; scripts and
+# builds don't see aliases.
+if (( $+commands[nvim] )); then alias vi="nvim"; fi
+if (( $+commands[bat] )); then alias cat="bat --style=full,-numbers"; fi
+alias cc="claude"
+alias ccc="claude --continue"
+alias cx="codex"
+alias oc="opencode"
+
 # alias finder
 zstyle ':omz:plugins:alias-finder' autoload yes # disabled by default
 zstyle ':omz:plugins:alias-finder' longer yes # disabled by default

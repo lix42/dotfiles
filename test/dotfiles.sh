@@ -243,6 +243,53 @@ log_has_merge() {
 }
 check "log lists the test file's history" log_has_merge
 
+echo "# symlinked live copies"
+mkdir -p "$TMP/elsewhere"
+printf 'theirs\n' >"$TMP/elsewhere/target"
+rm -f "$T"
+ln -s "$TMP/elsewhere/target" "$T"
+check "a symlinked live copy is link" state_is "$T" link
+check_not "sync skips a symlinked live copy" D sync .testrc
+check "install replaces the symlink" D install .testrc
+check "  with a real file" test ! -L "$T"
+check "  matching the repo" same_file "$T" "$S"
+check "  leaving the link's target alone" has_line "$TMP/elsewhere/target" theirs
+printf 'edit\n' >>"$T"
+D install --force .testrc >/dev/null 2>&1 # usually in the same second
+check "  even after another install (backup directories are per run)" test "$(cat "$TMP/elsewhere/target")" = theirs
+rm -f "$T"
+ln -s "$TMP/nowhere" "$T"
+check "a dangling symlink is link too" state_is "$T" link
+check "install replaces a dangling symlink" D install .testrc
+check "  with a real file" test ! -L "$T"
+
+echo "# paths, merge baseline, setup flags, DOTFILES_DIR"
+check_not "status refuses a path with .." D status ../README.md
+check_not "install refuses a path with .." D install ../README.md
+mkdir -p "$TMP/team-secrets"
+printf 'x\n' >"$TMP/team-secrets/account.conf"
+ln -s "$TMP/team-secrets" "$H/team"
+check_not "add refuses a sensitive real name outside \$HOME" D add "$H/team/account.conf"
+
+printf 'same-edit\n' >>"$T"
+printf 'same-edit\n' >>"$S"
+check "matching edits on both sides are same" state_is "$T" same
+check "merge refreshes the baseline for them" D merge .testrc
+printf 'later\n' >>"$T"
+check "  so a later live edit is local" state_is "$T" local
+D install --force .testrc >/dev/null 2>&1
+
+# A stub, so a regression here can't run the real installers.
+# shellcheck disable=SC2016 # $HOME expands when the stub runs
+printf '#!/bin/sh\ntouch "$HOME/.tools-ran"\n' >"$R/install/tools.sh"
+check_not "setup refuses a mistyped --dry-run" D setup --dryrun
+check_not "  without running tools.sh" test -e "$H/.tools-ran"
+check_not "setup refuses extra arguments" D setup --dry-run extra
+
+relative_install() { (cd "$R" && HOME="$H" XDG_STATE_HOME="$H/.local/state" DOTFILES_DIR=. bin/dotfiles install); }
+relative_install >/dev/null 2>&1
+check "a relative DOTFILES_DIR still makes a working ~/.local/bin/dotfiles" test -x "$H/.local/bin/dotfiles"
+
 echo "# pre-commit hook"
 gh_token="ghp_$(printf 'A%.0s' $(seq 36))"
 npm_token="npm_$(printf 'B%.0s' $(seq 36))"
