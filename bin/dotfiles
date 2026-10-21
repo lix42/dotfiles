@@ -13,7 +13,12 @@ while [ -L "$self" ]; do
     *) self="$(dirname "$self")/$link" ;;
   esac
 done
-DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "$self")/.." && pwd)}"
+# Absolute even when DOTFILES_DIR is given as a relative path: the
+# ~/.local/bin/dotfiles link is made from it.
+DOTFILES_DIR="$(cd "${DOTFILES_DIR:-$(dirname "$self")/..}" 2>/dev/null && pwd)" || {
+  printf 'dotfiles: DOTFILES_DIR is not a directory\n' >&2
+  exit 1
+}
 SRC="$DOTFILES_DIR/home"
 PATTERNS="$DOTFILES_DIR/.githooks/secret-patterns"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles"
@@ -21,7 +26,9 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles"
 # repo that is never pushed. Comparing both copies against it tells which side
 # changed.
 BASE="$STATE_DIR/base"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+# Unique per run: two runs in the same second must not share a backup
+# directory, or the second could write through a link the first moved there.
+STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 # Machine-specific settings and secrets: never copied into the repo.
 NEVER_MANAGE=".config/zsh/local.zsh .config/zsh/secrets.zsh"
 
@@ -45,6 +52,7 @@ Files under $SRC are copied to the same path under \$HOME.
                             both      changed on both sides   -> dotfiles merge
                             differs   no baseline yet         -> dotfiles diff, then choose
                             missing   not in \$HOME           -> dotfiles install
+                            link      a symlink, not a copy   -> dotfiles install
   diff [file...]          Diff repo (-) against \$HOME (+)
   install [--dry-run] [--force] [file...]
                           Copy repo -> \$HOME. Skips local and both unless --force.
@@ -99,6 +107,10 @@ targets() {
   local a f
   for a in "$@"; do
     f="$(rel "$a")"
+    case "/$f/" in
+      //*) die "not under \$HOME: $a" ;;
+      */../*) die "use a path without '..': $a" ;;
+    esac
     [ -f "$SRC/$f" ] || die "not managed: $f (start managing it with: dotfiles add ~/$f)"
     printf '%s\n' "$f"
   done
@@ -106,7 +118,13 @@ targets() {
 
 state() {
   local f="$1"
-  if [ ! -e "$HOME/$f" ]; then
+  # A symlinked file isn't a copy: writing through it would change its target,
+  # which can be outside $HOME. install replaces the link itself. A symlinked
+  # parent directory (~/.config -> elsewhere) is followed on purpose: the copy
+  # goes where the user's own link points.
+  if [ -L "$HOME/$f" ]; then
+    echo link
+  elif [ ! -e "$HOME/$f" ]; then
     echo missing
   elif cmp -s "$SRC/$f" "$HOME/$f"; then
     echo same
@@ -209,12 +227,15 @@ refuse_sensitive() {
   # home directory whose own path contains "secret" doesn't refuse everything.
   refuse_sensitive_name "$f" "/$f"
   home_real="$(physical_dir "$HOME")" || die "can't resolve \$HOME"
+  # Outside $HOME, through a symlinked directory, the whole real path counts
+  # (~/external -> /tmp/team-secrets).
   case "$real" in
     "$home_real"/*)
       if [ "${real#"$home_real"}" != "/$f" ]; then
         refuse_sensitive_name "$f" "${real#"$home_real"}" " (it is ~${real#"$home_real"})"
       fi
       ;;
+    *) refuse_sensitive_name "$f" "$real" " (it is $real)" ;;
   esac
 }
 
@@ -284,6 +305,12 @@ cmd_diff() {
     [ -n "$f" ] || continue
     case "$(state "$f")" in
       missing) printf 'missing: ~/%s (only in the repo)\n' "$f" ;;
+      link)
+        printf 'link: ~/%s is a symlink to %s; install replaces it with the repo copy\n' "$f" "$(readlink "$HOME/$f")"
+        if [ -e "$HOME/$f" ]; then
+          diff -u --label "repo: home/$f" --label "live: ~/$f (via link)" "$SRC/$f" "$HOME/$f" || true
+        fi
+        ;;
       same) ;;
       *) diff -u --label "repo: home/$f" --label "live: ~/$f" "$SRC/$f" "$HOME/$f" || true ;;
     esac
@@ -333,7 +360,12 @@ cmd_install() {
       printf 'would install ~/%s (%s)\n' "$f" "$s"
       continue
     fi
-    if [ "$s" != missing ]; then
+    if [ "$s" = link ]; then
+      # Move the link itself aside; its target stays untouched.
+      mkdir -p "$(dirname "$backup/$f")"
+      mv "$HOME/$f" "$backup/$f"
+      backed=1
+    elif [ "$s" != missing ]; then
       mkdir -p "$(dirname "$backup/$f")"
       cp -p "$HOME/$f" "$backup/$f"
       backed=1
@@ -407,6 +439,11 @@ cmd_sync() {
         skipped=1
         continue
         ;;
+      link)
+        warn "skipped ~/$f: it is a symlink, not a copy; replace it with the repo copy with 'dotfiles install'"
+        skipped=1
+        continue
+        ;;
     esac
     if [ "$force" -eq 0 ]; then
       case "$s" in
@@ -445,8 +482,13 @@ cmd_merge() {
     [ -n "$f" ] || continue
     s="$(state "$f")"
     case "$s" in
-      same) continue ;;
-      local | repo | missing)
+      same)
+        # Both copies may have been edited to the same result; record it, or
+        # the next one-sided edit would look like a change on both sides.
+        base_refresh "$f"
+        continue
+        ;;
+      local | repo | missing | link)
         printf 'no merge needed for ~/%s (%s)\n' "$f" "$s"
         continue
         ;;
@@ -482,7 +524,7 @@ cmd_merge() {
     fi
     rm -f "$tmp"
   done <<<"$list"
-  if [ -n "$done_list" ]; then base_commit "merge:$done_list"; fi
+  base_commit "merge:${done_list:- (baseline only)}"
   if [ -n "$done_list" ]; then log "Review with: git -C $DOTFILES_DIR diff"; fi
   return "$conflicts"
 }
@@ -530,10 +572,33 @@ cmd_log() {
 
 cmd_setup() {
   local rc=0 dry=()
-  if [ "${1:-}" = --dry-run ]; then dry=(--dry-run); fi
+  # Reject anything else before changing anything: a mistyped --dry-run must
+  # not start a real setup.
+  case "$#:${1:-}" in
+    0:) ;;
+    1:--dry-run) dry=(--dry-run) ;;
+    *) die "usage: dotfiles setup [--dry-run]" ;;
+  esac
   # Subprocesses, so set -e still applies inside each step.
   "$self" install ${dry[@]+"${dry[@]}"} || rc=1
   "$DOTFILES_DIR/install/tools.sh" ${dry[@]+"${dry[@]}"} || rc=1
+  # install ran before tools.sh could install jq; set the status line now,
+  # with Homebrew on PATH as tools.sh had it, since jq may come from there.
+  if [ "${#dry[@]}" -eq 0 ]; then
+    local b
+    for b in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew; do
+      if [ -x "$b" ]; then
+        eval "$("$b" shellenv)"
+        break
+      fi
+    done
+    if command -v jq >/dev/null 2>&1; then
+      "$DOTFILES_DIR/install/claude-settings.sh" || rc=1
+    else
+      warn "jq is still missing, so the Claude Code status line isn't set up"
+      rc=1
+    fi
+  fi
   printf '\n'
   log "Managed files now (installers may have edited shell config):"
   cmd_status
