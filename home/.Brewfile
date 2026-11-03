@@ -30,6 +30,8 @@ brew "neovim"
 brew "poppler"
 # Search tool like grep and The Silver Searcher
 brew "ripgrep"
+# Terminal multiplexer
+brew "tmux"
 # Shell extension to navigate your filesystem faster
 brew "zoxide"
 # Terminal emulator that uses platform-native UI and GPU acceleration
