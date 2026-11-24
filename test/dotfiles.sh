@@ -235,6 +235,36 @@ else
   printf 'skip Claude Code settings: jq is not installed\n'
 fi
 
+echo "# macOS defaults"
+# Stubs stand in for uname, defaults and killall, so the real preferences and
+# Dock are never touched. They log each call to $M/calls.
+export M="$TMP/macos"
+mkdir -p "$M/bin"
+cat >"$M/bin/uname" <<'STUB'
+#!/bin/sh
+echo "${FAKE_OS:-Darwin}"
+STUB
+cat >"$M/bin/defaults" <<'STUB'
+#!/bin/sh
+echo "defaults $*" >>"$M/calls"
+case "$1" in
+  read) if [ -n "${FAKE_VALUE:-}" ]; then echo "$FAKE_VALUE"; else exit 1; fi ;;
+esac
+STUB
+cat >"$M/bin/killall" <<'STUB'
+#!/bin/sh
+echo "killall $*" >>"$M/calls"
+STUB
+chmod +x "$M/bin/uname" "$M/bin/defaults" "$M/bin/killall"
+macos_run() { : >"$M/calls"; PATH="$M/bin:$PATH" "$R/install/macos-defaults.sh"; }
+check "macos-defaults sets a missing preference" macos_run
+check "  with defaults write" grep -qxF "defaults write com.apple.dock appswitcher-all-displays -bool true" "$M/calls"
+check "  and restarts the Dock" grep -qxF "killall Dock" "$M/calls"
+FAKE_VALUE=1 macos_run
+check "macos-defaults leaves a matching preference alone" test "$(grep -c -e write -e killall "$M/calls")" = 0
+FAKE_OS=Linux macos_run
+check "macos-defaults does nothing off macOS" test ! -s "$M/calls"
+
 echo "# log"
 # Capture first: under pipefail, `D log | grep -q` can fail on SIGPIPE.
 log_has_merge() {

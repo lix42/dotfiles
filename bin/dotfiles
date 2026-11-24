@@ -412,6 +412,7 @@ setup_machine() {
 
   git -C "$DOTFILES_DIR" config core.hooksPath .githooks
   "$DOTFILES_DIR/install/claude-settings.sh"
+  "$DOTFILES_DIR/install/macos-defaults.sh"
 }
 
 cmd_sync() {

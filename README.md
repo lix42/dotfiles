@@ -79,6 +79,9 @@ Machine state set up by a full `install` (all idempotent):
 - `core.hooksPath=.githooks` in this repo
 - `statusLine` in `~/.claude/settings.json`, merged with `jq` by
   `install/claude-settings.sh` (Claude Code rewrites that file, so it isn't a copy)
+- macOS preferences, set with `defaults` by `install/macos-defaults.sh`: the
+  ⌘⇥ app switcher shows on every display. It writes only values that differ,
+  restarts the Dock when a Dock value changed, and does nothing on other systems
 
 ## Layout
 
@@ -93,6 +96,7 @@ Machine state set up by a full `install` (all idempotent):
 | `home/.config/ghostty/config.ghostty` | Ghostty settings. Ghostty also reads `~/Library/Application Support/com.mitchellh.ghostty/` and lets it override this file, so keep that folder empty |
 | `install/tools.sh` | Installs tools: official installer first, Homebrew as fallback |
 | `install/claude-settings.sh` | Merges `statusLine` into Claude Code settings |
+| `install/macos-defaults.sh` | Sets macOS preferences with `defaults` (no admin rights needed) |
 | `.githooks/pre-commit`, `.githooks/secret-patterns` | Blocks commits that look like they contain a credential |
 | `test/dotfiles.sh` | Tests for `bin/dotfiles` and the pre-commit hook, in scratch directories |
 
