@@ -99,6 +99,7 @@ README.md.
 # One file per call: `bash -n a b` checks only a, passing b to it as an argument.
 for f in bin/dotfiles install/tools.sh .githooks/pre-commit test/dotfiles.sh; do bash -n "$f"; done
 sh -n install/claude-settings.sh
+sh -n install/macos-defaults.sh
 for f in home/.zshrc home/.zshenv home/.zprofile; do zsh -n "$f"; done
 shellcheck bin/dotfiles install/*.sh .githooks/pre-commit test/dotfiles.sh   # if installed
 test/dotfiles.sh
