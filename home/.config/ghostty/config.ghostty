@@ -1,15 +1,27 @@
 quit-after-last-window-closed = true
 clipboard-read = allow
+copy-on-select = clipboard
 window-theme = ghostty
 window-padding-balance = true
+window-new-tab-position = end
+window-show-tab-bar = always
 background-opacity = 0.9
 background-blur = macos-glass-regular
-split-divider-color = "e0f0f0"
+split-divider-color = #DF8627
 cursor-color = #F48915
 cursor-style-blink = true
 font-size = 16
 font-family = "FiraCode Nerd Font"
 mouse-hide-while-typing = true
+undo-timeout = 10m
+bell-features = system
+
+# Notify when a command that ran at least 5s finishes while Ghostty is unfocused.
+notify-on-command-finish = unfocused
+notify-on-command-finish-after = 5s
+
+shell-integration = zsh
+shell-integration-features = sudo,ssh-env,ssh-terminfo
 
 # macOS-style Cmd+Arrow navigation.
 #
